@@ -46,6 +46,11 @@ import {
 
 export type Callback = boolean => ?Callback;
 
+
+/**
+ *opaque为Flow的类型修饰符，表示“不透明类型”
+ * 防止外部代码直接构造或修改Task对象，强制通过API操作
+ */
 export opaque type Task = {
   id: number,
   callback: Callback | null,
@@ -57,14 +62,20 @@ export opaque type Task = {
 };
 
 let getCurrentTime: () => number | DOMHighResTimeStamp;
+
+/**
+ * performance为浏览器提供的Web Performance API,用于高精度时间测量
+ */
 const hasPerformanceNow =
   // $FlowFixMe[method-unbinding]
   typeof performance === 'object' && typeof performance.now === 'function';
 
 if (hasPerformanceNow) {
+  //performance.now()返回的是相对于页面加载时刻的时间
   const localPerformance = performance;
   getCurrentTime = () => localPerformance.now();
 } else {
+  //降级方案：使用当前时间减去页面加载时记录的时间模拟performance.now()的效果
   const localDate = Date;
   const initialTime = localDate.now();
   getCurrentTime = () => localDate.now() - initialTime;
@@ -73,9 +84,17 @@ if (hasPerformanceNow) {
 // Max 31 bit integer. The max integer size in V8 for 32-bit systems.
 // Math.pow(2, 30) - 1
 // 0b111111111111111111111111111111
+
+/**
+ * 用于计算任务过期时间，确保不会溢出
+ */
 var maxSigned31BitInt = 1073741823;
 
 // Tasks are stored on a min heap
+/**
+ *taskQueue： 任务队列 => 存放可以立即执行的任务
+ *timerQueue：延迟队列 => 存放尚未到执行时间的任务
+ */
 var taskQueue: Array<Task> = [];
 var timerQueue: Array<Task> = [];
 
@@ -88,7 +107,10 @@ var currentPriorityLevel: PriorityLevel = NormalPriority;
 // This is set while performing work, to prevent re-entrance.
 var isPerformingWork = false;
 
+//是否已经向宿主环境注册了任务调度回调
 var isHostCallbackScheduled = false;
+
+//是否已经向宿主环境（浏览器）注册了定时器
 var isHostTimeoutScheduled = false;
 
 var needsPaint = false;
@@ -100,8 +122,14 @@ const localClearTimeout =
 const localSetImmediate =
   typeof setImmediate !== 'undefined' ? setImmediate : null; // IE and Node.js + jsdom
 
+
+/**
+ * 将所有到期的延迟任务从timerQueue迁移到taskQueue
+ */
 function advanceTimers(currentTime: number) {
   // Check for tasks that are no longer delayed and add them to the queue.
+
+  //取出延迟任务队列中的堆顶任务
   let timer = peek(timerQueue);
   while (timer !== null) {
     if (timer.callback === null) {
@@ -112,48 +140,66 @@ function advanceTimers(currentTime: number) {
       pop(timerQueue);
       timer.sortIndex = timer.expirationTime;
       push(taskQueue, timer);
+      //enableProfiling => 性能分析开关，控制是否收集任务执行的性能数据
       if (enableProfiling) {
         markTaskStart(timer, currentTime);
         timer.isQueued = true;
       }
     } else {
       // Remaining timers are pending.
+      //堆顶的任务还没到期，跳过后面的任务
       return;
     }
+    //继续检查堆顶任务
     timer = peek(timerQueue);
   }
 }
 
+/**
+ * 核心职责：处理延迟任务到期，触发后续调度流程
+ */
 function handleTimeout(currentTime: number) {
+  //isHostTimeoutScheduled 宿主环境定时器唯一标记
   isHostTimeoutScheduled = false;
   advanceTimers(currentTime);
 
+  //isHostCallbackScheduled 宿主环境中是否存在任务调度标记
   if (!isHostCallbackScheduled) {
+    //taskQueue有可执行任务，请求调度
     if (peek(taskQueue) !== null) {
       isHostCallbackScheduled = true;
       requestHostCallback();
     } else {
       const firstTimer = peek(timerQueue);
       if (firstTimer !== null) {
+        //注册定时器
         requestHostTimeout(handleTimeout, firstTimer.startTime - currentTime);
       }
     }
   }
 }
 
+
+/**
+ * flushWork是workLoop的包装函数，帮助管理任务循环中的一些状态
+ */
 function flushWork(initialTime: number) {
   if (enableProfiling) {
     markSchedulerUnsuspended(initialTime);
   }
 
   // We'll need a host callback the next time work is scheduled.
+  //重置回调标记，允许下次注册新的调度
   isHostCallbackScheduled = false;
+
+  /*现在要直接执行任务，不需要等待定时器触发*/
   if (isHostTimeoutScheduled) {
     // We scheduled a timeout but it's no longer needed. Cancel it.
     isHostTimeoutScheduled = false;
     cancelHostTimeout();
   }
 
+  //标记正在工作中
   isPerformingWork = true;
   const previousPriorityLevel = currentPriorityLevel;
   try {
@@ -185,12 +231,23 @@ function flushWork(initialTime: number) {
   }
 }
 
+
+/**
+ * 任务循环
+ */
 function workLoop(initialTime: number) {
   let currentTime = initialTime;
   advanceTimers(currentTime);
   currentTask = peek(taskQueue);
   while (currentTask !== null) {
+    /**
+     * enableAlwaysYieldScheduler => 实验性调度策略开关（默认关闭）
+     * 控制 Scheduler 是否在每个任务执行后都让出控制权给浏览器（js单线程）
+     * enableAlwaysYieldScheduler = false : 执行任务前检查是否需要让出控制权
+     * 响应速度较慢，任务吞吐量较高
+     * */
     if (!enableAlwaysYieldScheduler) {
+      //当前任务未超时且需要让出控制权给浏览器
       if (currentTask.expirationTime > currentTime && shouldYieldToHost()) {
         // This currentTask hasn't expired, and we've reached the deadline.
         break;
@@ -209,12 +266,23 @@ function workLoop(initialTime: number) {
         // $FlowFixMe[incompatible-call] found when upgrading Flow
         markTaskRun(currentTask, currentTime);
       }
+      /**
+       * 告诉回调函数：你是否已经超时
+       * 让任务知道自己的紧迫程度以选择不同的执行策略
+       */
       const continuationCallback = callback(didUserCallbackTimeout);
       currentTime = getCurrentTime();
+
+      /**
+       * 如果任务返回了一个延续函数（continuationCallback）
+       * 此时任务主动选择让出，通常是因为检测到了高优先级工作或用户交互，应该尽快交还控制权
+       */
       if (typeof continuationCallback === 'function') {
         // If a continuation is returned, immediately yield to the main thread
         // regardless of how much time is left in the current time slice.
         // $FlowFixMe[incompatible-use] found when upgrading Flow
+
+        /*保存当前任务的延续函数，下次继续执行*/
         currentTask.callback = continuationCallback;
         if (enableProfiling) {
           // $FlowFixMe[incompatible-call] found when upgrading Flow
@@ -238,7 +306,12 @@ function workLoop(initialTime: number) {
       pop(taskQueue);
     }
     currentTask = peek(taskQueue);
+    /**
+     * enableAlwaysYieldScheduler = true : 每次任务执行完成后检查是否让出控制权
+     * 响应速度较快，任务吞吐量较低
+     */
     if (enableAlwaysYieldScheduler) {
+      //当前无任务或任务未超时 => 让出控制权
       if (currentTask === null || currentTask.expirationTime > currentTime) {
         // This currentTask hasn't expired we yield to the browser task.
         break;
@@ -246,6 +319,12 @@ function workLoop(initialTime: number) {
     }
   }
   // Return whether there's additional work
+
+  /**
+   * while循环跳出，Scheduler让出控制权
+   * taskQueue中仍存在任务 => return true
+   * 否则查看timerQueue堆顶任务，以其执行时间注册定时器触发后续调度，return false
+   * */
   if (currentTask !== null) {
     return true;
   } else {
@@ -344,6 +423,8 @@ function unstable_scheduleCallback(
   }
 
   var timeout;
+
+  /*根据任务优先级获取任务开始执行的时间*/
   switch (priorityLevel) {
     case ImmediatePriority:
       // Times out immediately
@@ -444,12 +525,19 @@ let taskTimeoutID: TimeoutID = (-1: any);
 let frameInterval: number = frameYieldMs;
 let startTime = -1;
 
+
+/**
+ * 决定是否应该让出控制权给浏览器
+ */
 function shouldYieldToHost(): boolean {
+  //如果需要重绘，立即让出
   if (!enableAlwaysYieldScheduler && enableRequestPaint && needsPaint) {
     // Yield now.
     return true;
   }
+  //记录已执行的时间
   const timeElapsed = getCurrentTime() - startTime;
+  //调度器执行时间小于一个时间片（5ms）则不让出控制权给浏览器，继续执行任务调度
   if (timeElapsed < frameInterval) {
     // The main thread has only been blocked for a really short amount of time;
     // smaller than a single frame. Don't yield yet.
@@ -459,6 +547,9 @@ function shouldYieldToHost(): boolean {
   return true;
 }
 
+/**
+ * React在某些场景下主动调用 => 告知Scheduler：需要重绘了
+ */
 function requestPaint() {
   if (enableRequestPaint) {
     needsPaint = true;
@@ -482,6 +573,10 @@ function forceFrameRate(fps: number) {
   }
 }
 
+
+/**
+ * 执行任务，直到时间切片用完为止
+ */
 const performWorkUntilDeadline = () => {
   if (enableRequestPaint) {
     needsPaint = false;
@@ -500,11 +595,18 @@ const performWorkUntilDeadline = () => {
     // remain true, and we'll continue the work loop.
     let hasMoreWork = true;
     try {
+
+      /**
+       * 任务队列仍有任务未完成
+       * 1、返回延迟函数的任务
+       * 2、未执行的任务
+       */
       hasMoreWork = flushWork(currentTime);
     } finally {
       if (hasMoreWork) {
         // If there's more work, schedule the next message event at the end
         // of the preceding one.
+        /*仍然有任务 => 在下一次事件循环中进行*/
         schedulePerformWorkUntilDeadline();
       } else {
         isMessageLoopRunning = false;
@@ -514,6 +616,11 @@ const performWorkUntilDeadline = () => {
 };
 
 let schedulePerformWorkUntilDeadline;
+
+/**
+ * 多层降级处理
+ * 均确保异步调度，让出一定控制权给浏览器，避免JS线程卡死
+ */
 if (typeof localSetImmediate === 'function') {
   // Node.js and old IE.
   // There's a few reasons for why we prefer setImmediate.
@@ -546,6 +653,9 @@ if (typeof localSetImmediate === 'function') {
   };
 }
 
+/**
+ * 向浏览器请求在下一个事件循环执行 workLoop
+ */
 function requestHostCallback() {
   if (!isMessageLoopRunning) {
     isMessageLoopRunning = true;
@@ -553,6 +663,7 @@ function requestHostCallback() {
   }
 }
 
+//向宿主环境（浏览器）注册定时器
 function requestHostTimeout(
   callback: (currentTime: number) => void,
   ms: number,
@@ -563,6 +674,8 @@ function requestHostTimeout(
   }, ms);
 }
 
+
+//定义宿主环境定时器清除函数
 function cancelHostTimeout() {
   // $FlowFixMe[not-a-function] nullable value
   localClearTimeout(taskTimeoutID);
