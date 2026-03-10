@@ -96,6 +96,10 @@ import {
 // A linked list of all the roots with pending work. In an idiomatic app,
 // there's only a single root, but we do support multi root apps, hence this
 // extra complexity. But this module is optimized for the single root case.
+
+/**
+ * Root链表：管理所有待处理工作的root
+ */
 export let firstScheduledRoot: FiberRoot | null = null;
 let lastScheduledRoot: FiberRoot | null = null;
 
@@ -113,6 +117,8 @@ let isFlushingWork: boolean = false;
 
 let currentEventTransitionLane: Lane = NoLane;
 
+
+//确保root都已在链表中
 export function ensureRootIsScheduled(root: FiberRoot): void {
   // This function is called whenever a root receives an update. It does two
   // things 1) it ensures the root is in the root schedule, and 2) it ensures
@@ -122,6 +128,7 @@ export function ensureRootIsScheduled(root: FiberRoot): void {
   // `scheduleTaskForRootDuringMicrotask` runs.
 
   // Add the root to the schedule
+  //判断root是否已经加入到链表中
   if (root === lastScheduledRoot || root.next !== null) {
     // Fast path. This root is already scheduled.
   } else {

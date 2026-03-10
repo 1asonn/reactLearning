@@ -30,11 +30,15 @@ let SchedulerFeatureFlags;
 //
 // This test suite mocks all browser methods used in our implementation. It
 // assumes as little as possible about the order and timing of events.
+
+//测试套件
 describe('SchedulerBrowser', () => {
+
+  //每个测试前执行
   beforeEach(() => {
     jest.resetModules();
-    runtime = installMockBrowserRuntime();
-    jest.unmock('scheduler');
+    runtime = installMockBrowserRuntime();//mock浏览器环境
+    jest.unmock('scheduler');//加载真实的scheduler模块，不要自动mock
 
     performance = global.performance;
     Scheduler = require('scheduler');
@@ -46,6 +50,8 @@ describe('SchedulerBrowser', () => {
     SchedulerFeatureFlags = require('../SchedulerFeatureFlags');
   });
 
+
+  //每个测试后执行
   afterEach(() => {
     delete global.performance;
 
@@ -74,6 +80,10 @@ describe('SchedulerBrowser', () => {
     };
 
     // Delete node provide setImmediate so we fall through to MessageChannel.
+    /**
+     * 测试文件中主动删除了setImmediate方法，因而降级使用到了MessageChannel
+     * 因此可以通过mock global.MessageChannel
+     */
     delete global.setImmediate;
 
     global.setTimeout = (cb, delay) => {
@@ -173,7 +183,9 @@ describe('SchedulerBrowser', () => {
     };
   }
 
+  //单个测试用例
   it('task that finishes before deadline', () => {
+    //测试代码
     scheduleCallback(NormalPriority, () => {
       runtime.log('Task');
     });

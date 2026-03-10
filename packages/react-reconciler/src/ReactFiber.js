@@ -137,7 +137,7 @@ if (__DEV__) {
 
 function FiberNode(
   this: $FlowFixMe,
-  tag: WorkTag,
+  tag: WorkTag, //节点类型（函数组件、类组件、DOM等）
   pendingProps: mixed,
   key: ReactKey,
   mode: TypeOfMode,
@@ -146,11 +146,11 @@ function FiberNode(
   this.tag = tag;
   this.key = key;
   this.elementType = null;
-  this.type = null;
-  this.stateNode = null;
+  this.type = null;//具体的组件函数或DOM类型
+  this.stateNode = null;//对应的真实DOM节点或组件实例
 
-  // Fiber
-  this.return = null;
+  // Fiber ==树结构==
+  this.return = null;//父节点
   this.child = null;
   this.sibling = null;
   this.index = 0;
